@@ -180,3 +180,71 @@ def test_font_size_is_unitless_in_user_space():
     assert 'font-size="250.00px"' not in svg_str
     # font-size must appear as a unitless number
     assert 'font-size="250.00"' in svg_str
+
+
+def test_contrast_safety_yellow_strokes_on_light_bg():
+    """
+    Verifies that AutoCAD ACI Color 2 (Yellow #FFFF00, Rec. 709 luminance ~0.927)
+    is high-contrast darkened against white canvas using the calibrated > 0.85 threshold.
+    """
+    ir = {
+        "format": "LAVINCI_CAD_IR_V3",
+        "layers": [
+            {"name": "YELLOW_LAYER", "hex_color": "#FFFF00"},
+        ],
+        "geometry_primitives": {
+            "primitives": {
+                "lines": [
+                    {"start": [0.0, 0.0], "end": [100.0, 0.0], "layer": "YELLOW_LAYER", "color": "#FFFF00"},
+                ],
+            }
+        },
+    }
+
+    svg_str, report = compile_ir_to_svg_string(ir, preset="web-interactive-light")
+    assert report.success is True
+
+    # Pure yellow stroke on white canvas must be darkened (must NOT appear as stroke="#FFFF00")
+    assert 'stroke="#FFFF00"' not in svg_str
+    assert 'stroke="#ffff00"' not in svg_str
+    # Must be remapped to dark default color
+    assert 'stroke="#1A1A1A"' in svg_str
+
+
+def test_cad_linetypes_to_stroke_dasharray():
+    """
+    Verifies standard CAD linetypes map correctly to SVG stroke-dasharray attributes.
+    DASHED -> "12,6", HIDDEN -> "6,6", CENTER -> "16,4,4,4", ACAD_ISO02W100 -> "12,3", ACAD_ISO04W100 -> "16,3,3,3".
+    """
+    ir = {
+        "format": "LAVINCI_CAD_IR_V3",
+        "layers": [
+            {"name": "0", "hex_color": "#000000"},
+            {"name": "ISO_LAYER", "hex_color": "#000000", "linetype": "ACAD_ISO02W100"},
+        ],
+        "geometry_primitives": {
+            "primitives": {
+                "lines": [
+                    {"start": [0.0, 0.0], "end": [100.0, 0.0], "layer": "0", "linetype": "DASHED"},
+                    {"start": [0.0, 10.0], "end": [100.0, 10.0], "layer": "0", "linetype": "HIDDEN"},
+                    {"start": [0.0, 20.0], "end": [100.0, 20.0], "layer": "0", "linetype": "CENTER"},
+                    {"start": [0.0, 30.0], "end": [100.0, 30.0], "layer": "0", "linetype": "ACAD_ISO04W100"},
+                    {"start": [0.0, 40.0], "end": [100.0, 40.0], "layer": "0", "linetype": "CONTINUOUS"},
+                    {"start": [0.0, 50.0], "end": [100.0, 50.0], "layer": "ISO_LAYER"},
+                ],
+                "circles": [
+                    {"center": [50.0, 50.0], "radius": 20.0, "layer": "0", "linetype": "DASHED"},
+                ],
+            }
+        },
+    }
+
+    svg_str, report = compile_ir_to_svg_string(ir)
+    assert report.success is True
+
+    assert 'stroke-dasharray="12,6"' in svg_str
+    assert 'stroke-dasharray="6,6"' in svg_str
+    assert 'stroke-dasharray="16,4,4,4"' in svg_str
+    assert 'stroke-dasharray="16,3,3,3"' in svg_str
+    assert 'stroke-dasharray="12,3"' in svg_str
+

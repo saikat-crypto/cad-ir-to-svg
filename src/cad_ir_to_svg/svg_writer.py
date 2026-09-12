@@ -93,7 +93,7 @@ def resolve_contrast_color(
     """
     Ensures foreground stroke or text color remains clearly visible against the canvas background.
     - If background is light (or default white / transparent on light page, bg_lum >= 0.8):
-      pure white (#FFFFFF) or near-white colors (lum > 0.93) are remapped to default_color (#1A1A1A).
+      pure white (#FFFFFF) or near-white/light colors (lum > 0.85) are remapped to default_color (#1A1A1A).
     - If background is dark (bg_lum < 0.2):
       pure black (#000000) or near-black colors (lum < 0.1) are remapped to #FFFFFF.
     """
@@ -108,8 +108,8 @@ def resolve_contrast_color(
     target_lum = hex_luminance(clean_target)
 
     if bg_lum >= 0.8:
-        # Light canvas: prevent invisible white strokes on white bg
-        if clean_target in ("#FFFFFF", "#FFF") or target_lum > 0.93:
+        # Light canvas: prevent invisible white or low-contrast yellow/light strokes on white bg
+        if clean_target in ("#FFFFFF", "#FFF") or target_lum > 0.85:
             return clean_default
     elif bg_lum < 0.2:
         # Dark canvas: prevent invisible dark strokes on dark bg
@@ -117,6 +117,70 @@ def resolve_contrast_color(
             return "#FFFFFF"
 
     return clean_target
+
+
+def map_cad_linetype_to_dasharray(linetype: Optional[str]) -> Optional[str]:
+    """
+    Maps standard CAD linetypes to SVG stroke-dasharray values.
+    Supports DASHED, HIDDEN, CENTER, DOT, DASHDOT, PHANTOM, and ACAD_ISO patterns.
+    """
+    if not linetype or not isinstance(linetype, str):
+        return None
+    lt = linetype.strip().upper()
+    if lt in ("", "CONTINUOUS", "SOLID", "BYLAYER", "BYBLOCK", "NONE"):
+        return None
+
+    # Exact matches and standard pattern mappings
+    if lt == "DASHED" or lt.startswith("DASHED"):
+        if "2" in lt and "X" not in lt:
+            return "6,3"
+        elif "X2" in lt:
+            return "24,12"
+        return "12,6"
+
+    if lt == "HIDDEN" or lt.startswith("HIDDEN"):
+        if "2" in lt and "X" not in lt:
+            return "3,3"
+        elif "X2" in lt:
+            return "12,12"
+        return "6,6"
+
+    if lt == "CENTER" or lt.startswith("CENTER"):
+        if "2" in lt and "X" not in lt:
+            return "8,2,2,2"
+        elif "X2" in lt:
+            return "32,8,8,8"
+        return "16,4,4,4"
+
+    if "ISO02W100" in lt:  # ACAD_ISO02W100: ISO dash
+        return "12,3"
+
+    if "ISO04W100" in lt:  # ACAD_ISO04W100: ISO long dash dot
+        return "16,3,3,3"
+
+    if "ISO03W100" in lt:  # ACAD_ISO03W100
+        return "12,3,3,3"
+
+    if "ISO05W100" in lt:  # ACAD_ISO05W100
+        return "16,3,3,3,3,3"
+
+    if lt.startswith("DOT"):
+        return "2,4"
+
+    if lt.startswith("DASHDOT"):
+        return "12,4,2,4"
+
+    if lt.startswith("PHANTOM"):
+        return "16,4,4,4,4,4"
+
+    if lt.startswith("DIVIDE"):
+        return "16,4,2,4,2,4"
+
+    if lt.startswith("BORDER"):
+        return "16,4,16,4,4,4"
+
+    return None
+
 
 
 class SvgWriter:
@@ -130,8 +194,8 @@ class SvgWriter:
         self.layer_attributes: Dict[str, Dict[str, str]] = {}
         self.root_elements: List[str] = []
 
-    def register_layer(self, layer_name: str, color: Optional[str] = None) -> None:
-        """Registers a layer with its default color styling and background-aware contrast safety."""
+    def register_layer(self, layer_name: str, color: Optional[str] = None, linetype: Optional[str] = None) -> None:
+        """Registers a layer with its default color styling, linetype, and background-aware contrast safety."""
         if layer_name not in self.layer_elements:
             self.layer_elements[layer_name] = []
 
@@ -141,10 +205,15 @@ class SvgWriter:
             if clean_c:
                 stroke_color = resolve_contrast_color(clean_c, self.preset.background_color, self.preset.default_stroke_color)
 
-        self.layer_attributes[layer_name] = {
+        attrs = {
             "stroke": stroke_color,
             "stroke-width": f"{self.preset.default_stroke_width}px",
         }
+        if linetype:
+            dash = map_cad_linetype_to_dasharray(linetype)
+            if dash:
+                attrs["stroke-dasharray"] = dash
+        self.layer_attributes[layer_name] = attrs
 
     def _get_target_layer_list(self, layer: Optional[str]) -> List[str]:
         target_layer = layer or "0"
@@ -161,8 +230,10 @@ class SvgWriter:
         layer: Optional[str] = None,
         color: Optional[str] = None,
         stroke_width: Optional[float] = None,
+        linetype: Optional[str] = None,
+        stroke_dasharray: Optional[str] = None,
     ) -> None:
-        """Appends an SVG <line> element with contrast safety."""
+        """Appends an SVG <line> element with contrast safety and linetype dasharray."""
         target = self._get_target_layer_list(layer)
         attrs = [
             f'x1="{x1:.3f}"',
@@ -178,6 +249,9 @@ class SvgWriter:
                 attrs.append(f'stroke="{safe_color}"')
         if stroke_width is not None and abs(stroke_width - self.preset.default_stroke_width) > 1e-4:
             attrs.append(f'stroke-width="{stroke_width:.2f}px"')
+        dash = stroke_dasharray or map_cad_linetype_to_dasharray(linetype)
+        if dash:
+            attrs.append(f'stroke-dasharray="{dash}"')
         if self.preset.non_scaling_stroke:
             attrs.append('vector-effect="non-scaling-stroke"')
 
@@ -191,8 +265,10 @@ class SvgWriter:
         layer: Optional[str] = None,
         color: Optional[str] = None,
         fill: Optional[str] = None,
+        linetype: Optional[str] = None,
+        stroke_dasharray: Optional[str] = None,
     ) -> None:
-        """Appends an SVG <circle> element with contrast safety."""
+        """Appends an SVG <circle> element with contrast safety and linetype dasharray."""
         target = self._get_target_layer_list(layer)
         attrs = [
             f'cx="{cx:.3f}"',
@@ -206,6 +282,9 @@ class SvgWriter:
             if clean_c:
                 safe_color = resolve_contrast_color(clean_c, self.preset.background_color, self.preset.default_stroke_color)
                 attrs.append(f'stroke="{safe_color}"')
+        dash = stroke_dasharray or map_cad_linetype_to_dasharray(linetype)
+        if dash:
+            attrs.append(f'stroke-dasharray="{dash}"')
         if self.preset.non_scaling_stroke:
             attrs.append('vector-effect="non-scaling-stroke"')
 
@@ -218,8 +297,10 @@ class SvgWriter:
         color: Optional[str] = None,
         fill: Optional[str] = None,
         stroke_width: Optional[float] = None,
+        linetype: Optional[str] = None,
+        stroke_dasharray: Optional[str] = None,
     ) -> None:
-        """Appends an SVG <path> element (for arcs, polylines, and complex contours) with contrast safety."""
+        """Appends an SVG <path> element (for arcs, polylines, and complex contours) with contrast safety and linetype dasharray."""
         if not d:
             return
         target = self._get_target_layer_list(layer)
@@ -235,6 +316,9 @@ class SvgWriter:
                 attrs.append(f'stroke="{safe_color}"')
         if stroke_width is not None and abs(stroke_width - self.preset.default_stroke_width) > 1e-4:
             attrs.append(f'stroke-width="{stroke_width:.2f}px"')
+        dash = stroke_dasharray or map_cad_linetype_to_dasharray(linetype)
+        if dash:
+            attrs.append(f'stroke-dasharray="{dash}"')
         if self.preset.non_scaling_stroke:
             attrs.append('vector-effect="non-scaling-stroke"')
 
@@ -247,8 +331,10 @@ class SvgWriter:
         layer: Optional[str] = None,
         color: Optional[str] = None,
         fill: Optional[str] = None,
+        linetype: Optional[str] = None,
+        stroke_dasharray: Optional[str] = None,
     ) -> None:
-        """Appends an SVG <polyline> or <polygon> element with contrast safety."""
+        """Appends an SVG <polyline> or <polygon> element with contrast safety and linetype dasharray."""
         if not points or len(points) < 2:
             return
 
@@ -266,6 +352,9 @@ class SvgWriter:
             if clean_c:
                 safe_color = resolve_contrast_color(clean_c, self.preset.background_color, self.preset.default_stroke_color)
                 attrs.append(f'stroke="{safe_color}"')
+        dash = stroke_dasharray or map_cad_linetype_to_dasharray(linetype)
+        if dash:
+            attrs.append(f'stroke-dasharray="{dash}"')
         if self.preset.non_scaling_stroke:
             attrs.append('vector-effect="non-scaling-stroke"')
 
@@ -387,6 +476,8 @@ class SvgWriter:
                     f'stroke="{stroke}"',
                     f'stroke-width="{stroke_w}"',
                 ]
+                if "stroke-dasharray" in layer_meta:
+                    group_attrs.append(f'stroke-dasharray="{layer_meta["stroke-dasharray"]}"')
                 if self.preset.non_scaling_stroke:
                     group_attrs.append('vector-effect="non-scaling-stroke"')
 

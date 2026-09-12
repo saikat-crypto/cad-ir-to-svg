@@ -16,6 +16,7 @@ from .geometry import (
     AffineMatrix2D,
     find_primary_cluster_1d,
     is_valid_point,
+    is_valid_point_pair,
     is_finite_number,
     cad_arc_to_svg_path,
 )
@@ -63,6 +64,7 @@ def compute_ir_extents(
 ) -> BoundingBox:
     """
     Computes spatial bounding box across all active primitives and block components.
+    Recursively unrolls component block hierarchies and transforms geometry into world space.
     Applies gap-based coordinate clustering if outlier_pruning is enabled to reject
     distant scratch geometry while strictly preserving multi-view drawings.
     """
@@ -72,14 +74,15 @@ def compute_ir_extents(
 
     def _feed_point(x: float, y: float):
         if is_finite_number(x) and is_finite_number(y):
-            # Guard against astronomical outliers (> 1e9)
-            if abs(x) < 1e9 and abs(y) < 1e9:
+            # Guard against astronomical outliers (|coord| < 1e7)
+            if abs(x) < 1e7 and abs(y) < 1e7:
                 x_coords.append(float(x))
                 y_coords.append(float(y))
                 box.expand(float(x), float(y))
 
     geom = ir.get("geometry_primitives")
     prims = geom.get("primitives", {}) if isinstance(geom, dict) else {}
+    block_defs = ir.get("block_definitions", {}) if isinstance(ir.get("block_definitions"), dict) else {}
 
     # 1. Lines
     lines = prims.get("lines", [])
@@ -88,7 +91,7 @@ def compute_ir_extents(
             if isinstance(line, dict):
                 start = line.get("start")
                 end = line.get("end")
-                if is_valid_point(start) and is_valid_point(end):
+                if is_valid_point_pair(start, end):
                     _feed_point(start[0], start[1])
                     _feed_point(end[0], end[1])
 
@@ -99,7 +102,7 @@ def compute_ir_extents(
             if isinstance(arc, dict):
                 c = arc.get("center")
                 r = arc.get("radius")
-                if is_valid_point(c) and is_finite_number(r) and r > 0:
+                if is_valid_point(c) and is_finite_number(r) and 0 < r < 1e7:
                     _feed_point(c[0] - r, c[1] - r)
                     _feed_point(c[0] + r, c[1] + r)
 
@@ -109,7 +112,7 @@ def compute_ir_extents(
             if isinstance(cir, dict):
                 c = cir.get("center")
                 r = cir.get("radius")
-                if is_valid_point(c) and is_finite_number(r) and r > 0:
+                if is_valid_point(c) and is_finite_number(r) and 0 < r < 1e7:
                     _feed_point(c[0] - r, c[1] - r)
                     _feed_point(c[0] + r, c[1] + r)
 
@@ -124,14 +127,99 @@ def compute_ir_extents(
                         if is_valid_point(pt):
                             _feed_point(pt[0], pt[1])
 
-    # 4. Component instances
+    # 4. Component instances (Recursive Block Unrolling)
+    def _unroll_block_extents(bname: str, matrix: AffineMatrix2D, depth: int, visited: set):
+        if depth > MAX_BLOCK_DEPTH or bname in visited:
+            return
+        bdef = block_defs.get(bname)
+        if not bdef or not isinstance(bdef, dict):
+            return
+        visited.add(bname)
+
+        # Lines inside block
+        for bline in bdef.get("lines", []):
+            if isinstance(bline, dict):
+                p1 = bline.get("start")
+                p2 = bline.get("end")
+                if is_valid_point_pair(p1, p2):
+                    tp1 = matrix.transform_point(p1[0], p1[1])
+                    tp2 = matrix.transform_point(p2[0], p2[1])
+                    _feed_point(tp1[0], tp1[1])
+                    _feed_point(tp2[0], tp2[1])
+
+        # Circles inside block
+        for bcir in bdef.get("circles", []):
+            if isinstance(bcir, dict):
+                c = bcir.get("center")
+                r = bcir.get("radius")
+                if is_valid_point(c) and is_finite_number(r) and 0 < r < 1e7:
+                    tc = matrix.transform_point(c[0], c[1])
+                    scale_factor = math.sqrt(abs(matrix.determinant)) if abs(matrix.determinant) > 1e-12 else 1.0
+                    eff_r = r * scale_factor
+                    _feed_point(tc[0] - eff_r, tc[1] - eff_r)
+                    _feed_point(tc[0] + eff_r, tc[1] + eff_r)
+
+        # Arcs inside block
+        for barc in bdef.get("arcs", []):
+            if isinstance(barc, dict):
+                c = barc.get("center")
+                r = barc.get("radius")
+                if is_valid_point(c) and is_finite_number(r) and 0 < r < 1e7:
+                    tc = matrix.transform_point(c[0], c[1])
+                    scale_factor = math.sqrt(abs(matrix.determinant)) if abs(matrix.determinant) > 1e-12 else 1.0
+                    eff_r = r * scale_factor
+                    _feed_point(tc[0] - eff_r, tc[1] - eff_r)
+                    _feed_point(tc[0] + eff_r, tc[1] + eff_r)
+
+        # Polylines inside block
+        for bpoly in bdef.get("polylines", []):
+            if isinstance(bpoly, dict):
+                pts = bpoly.get("points", [])
+                if isinstance(pts, list):
+                    for pt in pts:
+                        if is_valid_point(pt):
+                            tp = matrix.transform_point(pt[0], pt[1])
+                            _feed_point(tp[0], tp[1])
+
+        # Nested components within block definition
+        nested_comps = bdef.get("components", [])
+        if isinstance(nested_comps, list):
+            for ncomp in nested_comps:
+                if isinstance(ncomp, dict):
+                    nbname = ncomp.get("block_name")
+                    if nbname and nbname in block_defs:
+                        npos = ncomp.get("position", [0.0, 0.0])
+                        nrot = ncomp.get("rotation", 0.0)
+                        nscl = ncomp.get("scale", [1.0, 1.0, 1.0])
+                        nbdef = block_defs.get(nbname, {})
+                        nbpt = nbdef.get("base_point", [0.0, 0.0, 0.0]) if isinstance(nbdef, dict) else [0.0, 0.0, 0.0]
+                        nmat = AffineMatrix2D.from_cad_insert(npos, nrot, nscl, nbpt)
+                        if not nmat.is_singular:
+                            _unroll_block_extents(nbname, matrix.multiply(nmat), depth + 1, visited)
+
+        visited.remove(bname)
+
     comps = ir.get("components", [])
     if isinstance(comps, list):
         for comp in comps:
             if isinstance(comp, dict):
-                pos = comp.get("position")
+                bname = comp.get("block_name")
+                pos = comp.get("position", [0.0, 0.0])
                 if is_valid_point(pos):
                     _feed_point(pos[0], pos[1])
+                if bname and bname in block_defs:
+                    rot = comp.get("rotation", 0.0)
+                    scl = comp.get("scale", [1.0, 1.0, 1.0])
+                    bdef = block_defs.get(bname, {})
+                    bpt = bdef.get("base_point", [0.0, 0.0, 0.0]) if isinstance(bdef, dict) else [0.0, 0.0, 0.0]
+                    mat = AffineMatrix2D.from_cad_insert(pos, rot, scl, bpt)
+                    if not mat.is_singular:
+                        _unroll_block_extents(bname, mat, depth=0, visited=set())
+
+    # Anonymous Dimension Blocks (*D...)
+    for bname, bdef in block_defs.items():
+        if bname.startswith("*D") and isinstance(bdef, dict):
+            _unroll_block_extents(bname, AffineMatrix2D.identity(), depth=0, visited=set())
 
     # 5. Annotations
     annots = ir.get("annotations", [])
@@ -245,12 +333,21 @@ def compile_ir_to_svg_string(
 
     # Register Layers
     layers_data = ir.get("layers", [])
+    layer_linetypes: Dict[str, Optional[str]] = {}
     if isinstance(layers_data, list):
         for l in layers_data:
             if isinstance(l, dict):
                 lname = str(l.get("name", "0"))
                 lcolor = l.get("hex_color")
-                writer.register_layer(lname, color=lcolor)
+                llt = l.get("linetype")
+                layer_linetypes[lname] = str(llt) if llt else None
+                writer.register_layer(lname, color=lcolor, linetype=llt)
+
+    def _resolve_lt(entity: dict, layer: str) -> Optional[str]:
+        lt = entity.get("linetype")
+        if not lt or str(lt).upper() in ("BYLAYER", "BYBLOCK"):
+            return layer_linetypes.get(layer)
+        return str(lt)
 
     # 6. Extract Primitives & Blocks
     geom_data = ir.get("geometry_primitives", {})
@@ -262,9 +359,9 @@ def compile_ir_to_svg_string(
     entities_dropped = 0
 
     # Helper to emit a single line
-    def emit_line(start, end, layer="0", color=None, width=None):
+    def emit_line(start, end, layer="0", color=None, width=None, linetype=None):
         nonlocal entities_rendered, entities_dropped
-        if not is_valid_point(start) or not is_valid_point(end):
+        if not is_valid_point_pair(start, end):
             entities_dropped += 1
             _warn(HardeningCategory.COORDINATE_SINGULARITY, ActionTaken.DROPPED, "line", "Invalid point coordinates")
             return
@@ -274,13 +371,13 @@ def compile_ir_to_svg_string(
             return
         sp1 = cad_to_svg(start[0], start[1])
         sp2 = cad_to_svg(end[0], end[1])
-        writer.add_line(sp1[0], sp1[1], sp2[0], sp2[1], layer=layer, color=color, stroke_width=width)
+        writer.add_line(sp1[0], sp1[1], sp2[0], sp2[1], layer=layer, color=color, stroke_width=width, linetype=linetype)
         entities_rendered += 1
 
     # Helper to emit a circular arc
-    def emit_arc(center, radius, start_angle, end_angle, layer="0", color=None):
+    def emit_arc(center, radius, start_angle, end_angle, layer="0", color=None, linetype=None):
         nonlocal entities_rendered, entities_dropped
-        if not is_valid_point(center) or not is_finite_number(radius) or radius <= 0:
+        if not is_valid_point(center) or not is_finite_number(radius) or radius <= 0 or radius >= 1e7:
             entities_dropped += 1
             return
         d_path = cad_arc_to_svg_path(
@@ -289,23 +386,23 @@ def compile_ir_to_svg_string(
             cad_to_svg
         )
         if d_path:
-            writer.add_path(d_path, layer=layer, color=color)
+            writer.add_path(d_path, layer=layer, color=color, linetype=linetype)
             entities_rendered += 1
         else:
             entities_dropped += 1
 
     # Helper to emit a circle
-    def emit_circle(center, radius, layer="0", color=None):
+    def emit_circle(center, radius, layer="0", color=None, linetype=None):
         nonlocal entities_rendered, entities_dropped
-        if not is_valid_point(center) or not is_finite_number(radius) or radius <= 0:
+        if not is_valid_point(center) or not is_finite_number(radius) or radius <= 0 or radius >= 1e7:
             entities_dropped += 1
             return
         sc = cad_to_svg(center[0], center[1])
-        writer.add_circle(sc[0], sc[1], radius, layer=layer, color=color)
+        writer.add_circle(sc[0], sc[1], radius, layer=layer, color=color, linetype=linetype)
         entities_rendered += 1
 
     # Helper to emit a polyline
-    def emit_polyline(points, is_closed=False, layer="0", color=None):
+    def emit_polyline(points, is_closed=False, layer="0", color=None, linetype=None):
         nonlocal entities_rendered, entities_dropped
         if not points or len(points) < 2:
             entities_dropped += 1
@@ -314,7 +411,7 @@ def compile_ir_to_svg_string(
         if len(valid_pts) < 2:
             entities_dropped += 1
             return
-        writer.add_polyline(valid_pts, is_closed=is_closed, layer=layer, color=color)
+        writer.add_polyline(valid_pts, is_closed=is_closed, layer=layer, color=color, linetype=linetype)
         entities_rendered += 1
 
     # 7. Render Model Space Root Primitives
@@ -324,7 +421,8 @@ def compile_ir_to_svg_string(
         for line in raw_lines:
             entities_read += 1
             if isinstance(line, dict):
-                emit_line(line.get("start"), line.get("end"), layer=line.get("layer", "0"), color=line.get("color"))
+                layer = line.get("layer", "0")
+                emit_line(line.get("start"), line.get("end"), layer=layer, color=line.get("color"), linetype=_resolve_lt(line, layer))
 
     # Arcs
     raw_arcs = prims.get("arcs", [])
@@ -332,10 +430,11 @@ def compile_ir_to_svg_string(
         for arc in raw_arcs:
             entities_read += 1
             if isinstance(arc, dict):
+                layer = arc.get("layer", "0")
                 emit_arc(
                     arc.get("center"), arc.get("radius"),
                     arc.get("start_angle", 0.0), arc.get("end_angle", 360.0),
-                    layer=arc.get("layer", "0"), color=arc.get("color")
+                    layer=layer, color=arc.get("color"), linetype=_resolve_lt(arc, layer)
                 )
 
     # Circles
@@ -344,7 +443,8 @@ def compile_ir_to_svg_string(
         for cir in raw_circles:
             entities_read += 1
             if isinstance(cir, dict):
-                emit_circle(cir.get("center"), cir.get("radius"), layer=cir.get("layer", "0"), color=cir.get("color"))
+                layer = cir.get("layer", "0")
+                emit_circle(cir.get("center"), cir.get("radius"), layer=layer, color=cir.get("color"), linetype=_resolve_lt(cir, layer))
 
     # Polylines
     raw_polys = prims.get("polylines", [])
@@ -352,11 +452,13 @@ def compile_ir_to_svg_string(
         for poly in raw_polys:
             entities_read += 1
             if isinstance(poly, dict):
+                layer = poly.get("layer", "0")
                 emit_polyline(
                     poly.get("points", []),
                     is_closed=bool(poly.get("is_closed", False)),
-                    layer=poly.get("layer", "0"),
-                    color=poly.get("color")
+                    layer=layer,
+                    color=poly.get("color"),
+                    linetype=_resolve_lt(poly, layer)
                 )
 
     # 8. Render Hierarchical Block Instances (components)
@@ -383,37 +485,37 @@ def compile_ir_to_svg_string(
             if isinstance(bline, dict):
                 p1 = bline.get("start")
                 p2 = bline.get("end")
-                if is_valid_point(p1) and is_valid_point(p2):
+                if is_valid_point_pair(p1, p2):
                     tp1 = matrix.transform_point(p1[0], p1[1])
                     tp2 = matrix.transform_point(p2[0], p2[1])
                     layer = bline.get("layer") or parent_layer
-                    emit_line(tp1, tp2, layer=layer, color=bline.get("color"))
+                    emit_line(tp1, tp2, layer=layer, color=bline.get("color"), linetype=_resolve_lt(bline, layer))
 
         # Circles inside block
         for bcir in bdef.get("circles", []):
             if isinstance(bcir, dict):
                 c = bcir.get("center")
                 r = bcir.get("radius")
-                if is_valid_point(c) and is_finite_number(r) and r > 0:
+                if is_valid_point(c) and is_finite_number(r) and 0 < r < 1e7:
                     tc = matrix.transform_point(c[0], c[1])
                     # Effective isotropic scale
                     scale_factor = math.sqrt(abs(matrix.determinant)) if abs(matrix.determinant) > 1e-12 else 1.0
                     layer = bcir.get("layer") or parent_layer
-                    emit_circle(tc, r * scale_factor, layer=layer, color=bcir.get("color"))
+                    emit_circle(tc, r * scale_factor, layer=layer, color=bcir.get("color"), linetype=_resolve_lt(bcir, layer))
 
         # Arcs inside block
         for barc in bdef.get("arcs", []):
             if isinstance(barc, dict):
                 c = barc.get("center")
                 r = barc.get("radius")
-                if is_valid_point(c) and is_finite_number(r) and r > 0:
+                if is_valid_point(c) and is_finite_number(r) and 0 < r < 1e7:
                     tc = matrix.transform_point(c[0], c[1])
                     scale_factor = math.sqrt(abs(matrix.determinant)) if abs(matrix.determinant) > 1e-12 else 1.0
                     rot_deg = math.degrees(math.atan2(matrix.b, matrix.a))
                     sa = (barc.get("start_angle", 0.0) + rot_deg) % 360.0
                     ea = (barc.get("end_angle", 360.0) + rot_deg) % 360.0
                     layer = barc.get("layer") or parent_layer
-                    emit_arc(tc, r * scale_factor, sa, ea, layer=layer, color=barc.get("color"))
+                    emit_arc(tc, r * scale_factor, sa, ea, layer=layer, color=barc.get("color"), linetype=_resolve_lt(barc, layer))
 
         # Polylines inside block
         for bpoly in bdef.get("polylines", []):
@@ -422,7 +524,22 @@ def compile_ir_to_svg_string(
                 if isinstance(pts, list) and len(pts) >= 2:
                     tpts = [matrix.transform_point(p[0], p[1]) for p in pts if is_valid_point(p)]
                     layer = bpoly.get("layer") or parent_layer
-                    emit_polyline(tpts, is_closed=bool(bpoly.get("is_closed")), layer=layer, color=bpoly.get("color"))
+                    emit_polyline(tpts, is_closed=bool(bpoly.get("is_closed")), layer=layer, color=bpoly.get("color"), linetype=_resolve_lt(bpoly, layer))
+
+        # Nested components inside block
+        for ncomp in bdef.get("components", []):
+            if isinstance(ncomp, dict):
+                nbname = ncomp.get("block_name")
+                if nbname and nbname in block_defs:
+                    npos = ncomp.get("position", [0.0, 0.0])
+                    nrot = ncomp.get("rotation", 0.0)
+                    nscl = ncomp.get("scale", [1.0, 1.0, 1.0])
+                    nbdef = block_defs.get(nbname, {})
+                    nbpt = nbdef.get("base_point", [0.0, 0.0, 0.0]) if isinstance(nbdef, dict) else [0.0, 0.0, 0.0]
+                    nmat = AffineMatrix2D.from_cad_insert(npos, nrot, nscl, nbpt)
+                    if not nmat.is_singular:
+                        nlayer = ncomp.get("layer") or parent_layer
+                        render_block_recursive(nbname, matrix.multiply(nmat), nlayer, depth + 1, visited)
 
         visited.remove(block_name)
 

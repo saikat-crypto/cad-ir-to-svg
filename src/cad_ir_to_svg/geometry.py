@@ -19,10 +19,18 @@ def is_finite_number(val: Any) -> bool:
 
 
 def is_valid_point(pt: Any) -> bool:
-    """Checks if a point is a valid 2D sequence of finite floats [x, y]."""
+    """Checks if a point is a valid 2D sequence of finite floats [x, y] with |coord| <= 1e7."""
     if not isinstance(pt, (list, tuple)) or len(pt) < 2:
         return False
-    return is_finite_number(pt[0]) and is_finite_number(pt[1])
+    if not is_finite_number(pt[0]) or not is_finite_number(pt[1]):
+        return False
+    x, y = float(pt[0]), float(pt[1])
+    return abs(x) <= 1e7 and abs(y) <= 1e7
+
+
+def is_valid_point_pair(p1: Any, p2: Any) -> bool:
+    """Checks if two points are both valid 2D coordinates within float bounds."""
+    return is_valid_point(p1) and is_valid_point(p2)
 
 
 @dataclass
@@ -97,11 +105,13 @@ def find_primary_cluster_1d(
     coords: Sequence[float],
     min_gap_ratio: float = 0.10,
     max_outlier_ratio: float = 0.02,
+    max_outlier_count: int = 100,
 ) -> Tuple[float, float]:
     """
-    Identifies the primary cluster of coordinates along 1D axis using sorted gap analysis.
+    Identifies the primary cluster of coordinates along 1D axis using iterative sorted gap analysis.
     Safely prunes isolated scratch geometry or distant elevation markers without clipping
     multi-view floorplans, schedules, or architectural elevations.
+    Iteratively prunes secondary outlier gaps unmasked by earlier outlier removals.
     """
     finite_coords = sorted(c for c in coords if is_finite_number(c))
     if not finite_coords:
@@ -110,29 +120,43 @@ def find_primary_cluster_1d(
         return (finite_coords[0], finite_coords[-1])
 
     n = len(finite_coords)
-    total_span = finite_coords[-1] - finite_coords[0]
-    if total_span <= 1e-6:
-        return (finite_coords[0], finite_coords[-1])
-
     best_start = 0
     best_end = n - 1
 
-    # Check for large gaps from the left
-    for i in range(n - 1):
-        gap = finite_coords[i + 1] - finite_coords[i]
-        left_count = i + 1
-        if gap > total_span * min_gap_ratio and (left_count / n) <= max_outlier_ratio:
-            best_start = i + 1
-        elif (left_count / n) > max_outlier_ratio:
+    # Iterative outlier pruning (until convergence or max passes)
+    for _ in range(20):
+        current_span = finite_coords[best_end] - finite_coords[best_start]
+        if current_span <= 1e-6:
             break
 
-    # Check for large gaps from the right
-    for i in range(n - 1, 0, -1):
-        gap = finite_coords[i] - finite_coords[i - 1]
-        right_count = n - i
-        if gap > total_span * min_gap_ratio and (right_count / n) <= max_outlier_ratio:
-            best_end = i - 1
-        elif (right_count / n) > max_outlier_ratio:
+        changed = False
+
+        # Check for large gaps from the left
+        for i in range(best_start, best_end):
+            left_count = i + 1
+            if (left_count / n) > max_outlier_ratio or left_count > max_outlier_count:
+                break
+            gap = finite_coords[i + 1] - finite_coords[i]
+            if gap > current_span * min_gap_ratio:
+                best_start = i + 1
+                changed = True
+                break
+
+        if changed:
+            continue
+
+        # Check for large gaps from the right
+        for i in range(best_end, best_start, -1):
+            right_count = n - i
+            if (right_count / n) > max_outlier_ratio or right_count > max_outlier_count:
+                break
+            gap = finite_coords[i] - finite_coords[i - 1]
+            if gap > current_span * min_gap_ratio:
+                best_end = i - 1
+                changed = True
+                break
+
+        if not changed:
             break
 
     if best_start <= best_end:

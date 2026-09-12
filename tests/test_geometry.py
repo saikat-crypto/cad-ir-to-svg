@@ -9,6 +9,7 @@ from cad_ir_to_svg.geometry import (
     AffineMatrix2D,
     find_primary_cluster_1d,
     is_valid_point,
+    is_valid_point_pair,
     is_finite_number,
     calculate_arc_endpoints_and_sweep,
     cad_arc_to_svg_path,
@@ -33,6 +34,19 @@ def test_is_valid_point_and_finite_number():
     assert is_valid_point([10.0]) is False
     assert is_valid_point([]) is False
     assert is_valid_point(None) is False
+
+    # Astronomical float bounds (|coord| <= 1e7)
+    assert is_valid_point([1e7, 1e7]) is True
+    assert is_valid_point([-1e7, 0.0]) is True
+    assert is_valid_point([1.000001e7, 20.0]) is False
+    assert is_valid_point([0.0, -1.000001e7]) is False
+    assert is_valid_point([1e20, 0.0]) is False
+
+    # Point pairs
+    assert is_valid_point_pair([10.0, 20.0], [30.0, 40.0]) is True
+    assert is_valid_point_pair([10.0, 20.0], [1e8, 40.0]) is False
+    assert is_valid_point_pair([1e8, 20.0], [30.0, 40.0]) is False
+    assert is_valid_point_pair([10.0, float("nan")], [30.0, 40.0]) is False
 
 
 def test_bounding_box_operations():
@@ -67,6 +81,26 @@ def test_find_primary_cluster_pruning():
     p_min, p_max = find_primary_cluster_1d(points)
     assert p_min == 0.0
     assert p_max == 100.0
+
+
+def test_iterative_secondary_outlier_pruning():
+    """
+    Verifies that multi-step outlier gaps (such as Kato crane Y = -6.7M followed by Y = -26,665)
+    are iteratively pruned once the primary outlier gap is removed.
+    """
+    # 500 points representing legitimate crane geometry between 20,000 and 37,000
+    legitimate_model = [20000.0 + i * 34.0 for i in range(501)]
+    # Secondary outlier at -26,665 (swamped in single pass by the 6.7M outlier)
+    secondary_outlier = [-26665.0]
+    # Extreme primary outlier at -6.7M
+    primary_outlier = [-6769961.0]
+
+    all_coords = primary_outlier + secondary_outlier + legitimate_model
+    p_min, p_max = find_primary_cluster_1d(all_coords)
+
+    # Both outliers must be pruned; model bounds preserved
+    assert p_min == 20000.0
+    assert p_max == legitimate_model[-1]
 
 
 def test_affine_matrix_operations():

@@ -236,3 +236,54 @@ def test_introspection_bounds_and_layers(minimal_ir):
     assert "DOORS" in layers
 
 
+def test_compute_ir_extents_unrolls_components():
+    """
+    Verifies that compute_ir_extents unrolls component block definitions,
+    transforming internal lines, circles, arcs, and polylines with composite affine matrix,
+    so that component bounding extents are never clipped.
+    """
+    from cad_ir_to_svg.compiler import compute_ir_extents
+
+    ir = {
+        "format": "LAVINCI_CAD_IR_V3",
+        "block_definitions": {
+            "CRANE_BOOM": {
+                "base_point": [0.0, 0.0],
+                "lines": [
+                    {"start": [0.0, 0.0], "end": [500.0, 1000.0]},
+                ],
+                "circles": [
+                    {"center": [250.0, 500.0], "radius": 50.0},
+                ],
+                "arcs": [
+                    {"center": [100.0, 200.0], "radius": 30.0, "start_angle": 0.0, "end_angle": 180.0},
+                ],
+                "polylines": [
+                    {"points": [[0.0, 0.0], [100.0, 100.0], [200.0, 300.0]], "is_closed": False},
+                ],
+            }
+        },
+        "components": [
+            {
+                "block_name": "CRANE_BOOM",
+                "position": [1000.0, 2000.0],
+                "rotation": 0.0,
+                "scale": [2.0, 2.0],
+            }
+        ],
+        "geometry_primitives": {"primitives": {}},
+    }
+
+    bbox = compute_ir_extents(ir, outlier_pruning=False)
+    # The line (0,0)->(500,1000) scaled by 2 and translated by (1000, 2000):
+    # start: (1000, 2000), end: (2000, 4000)
+    assert bbox.is_valid is True
+    assert bbox.min_x <= 1000.0
+    assert bbox.max_x >= 2000.0
+    assert bbox.min_y <= 2000.0
+    assert bbox.max_y >= 4000.0
+    assert bbox.width >= 1000.0
+    assert bbox.height >= 2000.0
+
+
+
