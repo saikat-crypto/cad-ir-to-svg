@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cad-ir-to-svg"
+version = "1.0.0"
+description = "High-fidelity vector CAD compiler converting La Vinci Intermediate Representation (IR v3) into W3C-compliant Scalable Vector Graphics (SVG)."
+readme = "README.md"
+authors = [{ name = "Saikat Dutta Chowdhury", email = "saikat@lavinci.ai" }]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
+
+[project.scripts]
+cad-ir-to-svg = "cad_ir_to_svg.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
