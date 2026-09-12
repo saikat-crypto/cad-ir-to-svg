@@ -56,6 +56,69 @@ def sanitize_id(name: str) -> str:
     return clean or "layer"
 
 
+def clean_hex(val: Any) -> Optional[str]:
+    """Validates and normalizes hex strings into standard #RRGGBB format."""
+    if not isinstance(val, str):
+        return None
+    s = val.strip()
+    if s.startswith("#"):
+        s = s[1:]
+    if len(s) == 3 and re.fullmatch(r"[0-9a-fA-F]{3}", s):
+        s = "".join(c * 2 for c in s)
+    elif len(s) == 8 and re.fullmatch(r"[0-9a-fA-F]{8}", s):
+        s = s[:6]
+    if len(s) == 6 and re.fullmatch(r"[0-9a-fA-F]{6}", s):
+        return "#" + s.upper()
+    return None
+
+
+def hex_luminance(hex_str: Optional[str]) -> float:
+    """Computes standard Rec. 709 relative luminance for a normalized #RRGGBB hex color."""
+    if not hex_str or not hex_str.startswith("#") or len(hex_str) != 7:
+        return 0.0
+    try:
+        r = int(hex_str[1:3], 16) / 255.0
+        g = int(hex_str[3:5], 16) / 255.0
+        b = int(hex_str[5:7], 16) / 255.0
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    except Exception:
+        return 0.0
+
+
+def resolve_contrast_color(
+    color: Optional[str],
+    bg_color: Optional[str],
+    default_color: str = "#1A1A1A",
+) -> str:
+    """
+    Ensures foreground stroke or text color remains clearly visible against the canvas background.
+    - If background is light (or default white / transparent on light page, bg_lum >= 0.8):
+      pure white (#FFFFFF) or near-white colors (lum > 0.93) are remapped to default_color (#1A1A1A).
+    - If background is dark (bg_lum < 0.2):
+      pure black (#000000) or near-black colors (lum < 0.1) are remapped to #FFFFFF.
+    """
+    clean_target = clean_hex(color)
+    clean_default = clean_hex(default_color) or "#1A1A1A"
+
+    if not clean_target:
+        return clean_default
+
+    clean_bg = clean_hex(bg_color)
+    bg_lum = hex_luminance(clean_bg) if clean_bg else 1.0
+    target_lum = hex_luminance(clean_target)
+
+    if bg_lum >= 0.8:
+        # Light canvas: prevent invisible white strokes on white bg
+        if clean_target in ("#FFFFFF", "#FFF") or target_lum > 0.93:
+            return clean_default
+    elif bg_lum < 0.2:
+        # Dark canvas: prevent invisible dark strokes on dark bg
+        if clean_target in ("#000000", "#000") or target_lum < 0.1:
+            return "#FFFFFF"
+
+    return clean_target
+
+
 class SvgWriter:
     """
     Stateful SVG builder assembling XML elements into a structured document.
@@ -68,13 +131,15 @@ class SvgWriter:
         self.root_elements: List[str] = []
 
     def register_layer(self, layer_name: str, color: Optional[str] = None) -> None:
-        """Registers a layer with its default color styling."""
+        """Registers a layer with its default color styling and background-aware contrast safety."""
         if layer_name not in self.layer_elements:
             self.layer_elements[layer_name] = []
 
         stroke_color = self.preset.default_stroke_color
-        if self.preset.color_mode != "monochrome" and color and color.startswith("#"):
-            stroke_color = color
+        if self.preset.color_mode != "monochrome" and color:
+            clean_c = clean_hex(color)
+            if clean_c:
+                stroke_color = resolve_contrast_color(clean_c, self.preset.background_color, self.preset.default_stroke_color)
 
         self.layer_attributes[layer_name] = {
             "stroke": stroke_color,
@@ -97,7 +162,7 @@ class SvgWriter:
         color: Optional[str] = None,
         stroke_width: Optional[float] = None,
     ) -> None:
-        """Appends an SVG <line> element."""
+        """Appends an SVG <line> element with contrast safety."""
         target = self._get_target_layer_list(layer)
         attrs = [
             f'x1="{x1:.3f}"',
@@ -107,7 +172,10 @@ class SvgWriter:
         ]
 
         if color and self.preset.color_mode != "monochrome":
-            attrs.append(f'stroke="{color}"')
+            clean_c = clean_hex(color)
+            if clean_c:
+                safe_color = resolve_contrast_color(clean_c, self.preset.background_color, self.preset.default_stroke_color)
+                attrs.append(f'stroke="{safe_color}"')
         if stroke_width is not None and abs(stroke_width - self.preset.default_stroke_width) > 1e-4:
             attrs.append(f'stroke-width="{stroke_width:.2f}px"')
         if self.preset.non_scaling_stroke:
@@ -124,7 +192,7 @@ class SvgWriter:
         color: Optional[str] = None,
         fill: Optional[str] = None,
     ) -> None:
-        """Appends an SVG <circle> element."""
+        """Appends an SVG <circle> element with contrast safety."""
         target = self._get_target_layer_list(layer)
         attrs = [
             f'cx="{cx:.3f}"',
@@ -134,7 +202,10 @@ class SvgWriter:
         ]
 
         if color and self.preset.color_mode != "monochrome":
-            attrs.append(f'stroke="{color}"')
+            clean_c = clean_hex(color)
+            if clean_c:
+                safe_color = resolve_contrast_color(clean_c, self.preset.background_color, self.preset.default_stroke_color)
+                attrs.append(f'stroke="{safe_color}"')
         if self.preset.non_scaling_stroke:
             attrs.append('vector-effect="non-scaling-stroke"')
 
@@ -148,7 +219,7 @@ class SvgWriter:
         fill: Optional[str] = None,
         stroke_width: Optional[float] = None,
     ) -> None:
-        """Appends an SVG <path> element (for arcs, polylines, and complex contours)."""
+        """Appends an SVG <path> element (for arcs, polylines, and complex contours) with contrast safety."""
         if not d:
             return
         target = self._get_target_layer_list(layer)
@@ -158,7 +229,10 @@ class SvgWriter:
         ]
 
         if color and self.preset.color_mode != "monochrome":
-            attrs.append(f'stroke="{color}"')
+            clean_c = clean_hex(color)
+            if clean_c:
+                safe_color = resolve_contrast_color(clean_c, self.preset.background_color, self.preset.default_stroke_color)
+                attrs.append(f'stroke="{safe_color}"')
         if stroke_width is not None and abs(stroke_width - self.preset.default_stroke_width) > 1e-4:
             attrs.append(f'stroke-width="{stroke_width:.2f}px"')
         if self.preset.non_scaling_stroke:
@@ -174,7 +248,7 @@ class SvgWriter:
         color: Optional[str] = None,
         fill: Optional[str] = None,
     ) -> None:
-        """Appends an SVG <polyline> or <polygon> element."""
+        """Appends an SVG <polyline> or <polygon> element with contrast safety."""
         if not points or len(points) < 2:
             return
 
@@ -188,7 +262,10 @@ class SvgWriter:
         ]
 
         if color and self.preset.color_mode != "monochrome":
-            attrs.append(f'stroke="{color}"')
+            clean_c = clean_hex(color)
+            if clean_c:
+                safe_color = resolve_contrast_color(clean_c, self.preset.background_color, self.preset.default_stroke_color)
+                attrs.append(f'stroke="{safe_color}"')
         if self.preset.non_scaling_stroke:
             attrs.append('vector-effect="non-scaling-stroke"')
 
@@ -204,7 +281,7 @@ class SvgWriter:
         color: Optional[str] = None,
         rotation: float = 0.0,
     ) -> None:
-        """Appends an SVG <text> element with proper XML escaping and multi-line support."""
+        """Appends an SVG <text> element with proper XML escaping, contrast safety, and unitless font sizing."""
         clean = sanitize_cad_text(text)
         if not clean:
             return
@@ -212,10 +289,17 @@ class SvgWriter:
         target = self._get_target_layer_list(layer)
         fill_color = self.preset.default_stroke_color
         if color and self.preset.color_mode != "monochrome":
-            fill_color = color
+            clean_c = clean_hex(color)
+            if clean_c:
+                fill_color = resolve_contrast_color(clean_c, self.preset.background_color, self.preset.default_stroke_color)
+        elif self.preset.color_mode != "monochrome" and layer:
+            layer_meta = self.layer_attributes.get(layer, {})
+            layer_stroke = layer_meta.get("stroke")
+            if layer_stroke:
+                fill_color = layer_stroke
 
         lines = clean.split("\n")
-        safe_h = max(1.0, height)
+        safe_h = max(0.001, height)
 
         transform_attr = ""
         if abs(rotation) > 1e-4:
@@ -225,7 +309,7 @@ class SvgWriter:
         attrs = [
             f'x="{x:.3f}"',
             f'y="{y:.3f}"',
-            f'font-size="{safe_h:.2f}px"',
+            f'font-size="{safe_h:.2f}"',
             f'fill="{fill_color}"',
             'stroke="none"',
             'class="cad-text"',
@@ -240,7 +324,7 @@ class SvgWriter:
             tspan_elements = []
             for idx, line in enumerate(lines):
                 escaped = html.escape(line)
-                dy = f'{safe_h * 1.2:.2f}px' if idx > 0 else '0'
+                dy = f'{safe_h * 1.2:.2f}' if idx > 0 else '0'
                 tspan_elements.append(f'    <tspan x="{x:.3f}" dy="{dy}">{escaped}</tspan>')
             target.append(f'  <text {" ".join(attrs)}>\n' + "\n".join(tspan_elements) + '\n  </text>')
 

@@ -467,13 +467,19 @@ def compile_ir_to_svg_string(
                 if not isinstance(annot, dict):
                     continue
                 pos = annot.get("position")
-                raw_txt = annot.get("clean_text") or annot.get("raw_text")
+                raw_txt = annot.get("clean_text") or annot.get("raw_text") or annot.get("text") or annot.get("value")
                 if is_valid_point(pos) and raw_txt:
                     sp = cad_to_svg(pos[0], pos[1])
                     h = annot.get("height", 12.0)
                     alayer = annot.get("layer", "0")
                     rot = annot.get("rotation", 0.0)
-                    writer.add_text(sp[0], sp[1], str(raw_txt), height=float(h) if is_finite_number(h) else 12.0, layer=alayer, rotation=float(rot) if is_finite_number(rot) else 0.0)
+                    writer.add_text(
+                        sp[0], sp[1], str(raw_txt),
+                        height=float(h) if is_finite_number(h) else 12.0,
+                        layer=alayer,
+                        color=annot.get("color"),
+                        rotation=float(rot) if is_finite_number(rot) else 0.0,
+                    )
                     entities_rendered += 1
 
     # 11. Dimensions Text Labels
@@ -501,7 +507,8 @@ def compile_ir_to_svg_string(
                         sp[0], sp[1], str(dim_txt),
                         height=float(dh) if is_finite_number(dh) and float(dh) > 0 else 10.0,
                         layer=dlayer,
-                        rotation=float(drot) if is_finite_number(drot) else 0.0
+                        color=dim.get("color"),
+                        rotation=float(drot) if is_finite_number(drot) else 0.0,
                     )
                     entities_rendered += 1
 
