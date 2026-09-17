@@ -92,10 +92,12 @@ def resolve_contrast_color(
 ) -> str:
     """
     Ensures foreground stroke or text color remains clearly visible against the canvas background.
-    - If background is light (or default white / transparent on light page, bg_lum >= 0.8):
-      pure white (#FFFFFF) or near-white/light colors (lum > 0.85) are remapped to default_color (#1A1A1A).
-    - If background is dark (bg_lum < 0.2):
-      pure black (#000000) or near-black colors (lum < 0.1) are remapped to #FFFFFF.
+    - Uses WCAG relative luminance contrast ratio: (L1 + 0.05) / (L2 + 0.05).
+    - If background is light (bg_lum >= 0.75) and contrast ratio < 3.0:
+      remaps neon cyan (#00FFFF, #0FF) to rich blueprint blue (#006699) and yellow to dark golden amber (#996600)
+      or default_color (#1A1A1A).
+    - If background is dark (bg_lum < 0.25) and contrast ratio < 3.0:
+      remaps near-black colors to #FFFFFF.
     """
     clean_target = clean_hex(color)
     clean_default = clean_hex(default_color) or "#1A1A1A"
@@ -107,13 +109,25 @@ def resolve_contrast_color(
     bg_lum = hex_luminance(clean_bg) if clean_bg else 1.0
     target_lum = hex_luminance(clean_target)
 
-    if bg_lum >= 0.8:
-        # Light canvas: prevent invisible white or low-contrast yellow/light strokes on white bg
+    # Calculate WCAG Contrast Ratio
+    l1 = max(bg_lum, target_lum)
+    l2 = min(bg_lum, target_lum)
+    contrast_ratio = (l1 + 0.05) / (l2 + 0.05)
+
+    if bg_lum >= 0.75:
+        # Light canvas: ensure minimum 3:1 graphical contrast
         if clean_target in ("#FFFFFF", "#FFF") or target_lum > 0.85:
             return clean_default
-    elif bg_lum < 0.2:
+        if contrast_ratio < 3.0:
+            target_upper = clean_target.upper()
+            if target_upper in ("#00FFFF", "#0FF", "#00F0FF"):
+                return "#006699"  # High-contrast deep cyan/blue
+            if target_upper in ("#FFFF00", "#FF0"):
+                return "#996600"  # High-contrast amber/gold
+            return clean_default
+    elif bg_lum < 0.25:
         # Dark canvas: prevent invisible dark strokes on dark bg
-        if clean_target in ("#000000", "#000") or target_lum < 0.1:
+        if clean_target in ("#000000", "#000") or contrast_ratio < 3.0:
             return "#FFFFFF"
 
     return clean_target
